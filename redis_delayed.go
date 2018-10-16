@@ -5,6 +5,8 @@
 package delayed
 
 import (
+	"log"
+	"strconv"
 	"time"
 
 	"github.com/go-redis/redis"
@@ -38,12 +40,17 @@ func (rts *RedisTaskScheduler) ScheduleTaskAt(task Task, pit time.Time) (string,
 		return "", err
 	}
 
-	z := redis.Z{
-		Member: encodedWrapper,
-		Score:  float64(wrapper.Time.Unix()),
-	}
+	// We put two things in Redis, first the encodedWrapper as a regular Redis
+	// item, keyed by its ID. Then we put the key in a sorted set, with the
+	// execution time as the score.
 
-	if err := rts.client.ZAdd("Delayed", z).Err(); err != nil {
+	_, err = rts.client.TxPipelined(func(pipe redis.Pipeliner) error {
+		pipe.Set("Delayed:"+rts.name+":"+wrapper.ID, encodedWrapper, 0) // TODO Probably add expirationt time?
+		pipe.ZAdd("Delayed:"+rts.name, redis.Z{Member: wrapper.ID, Score: float64(wrapper.Time.Unix())})
+		return nil
+	})
+
+	if err != nil {
 		return "", err
 	}
 
@@ -55,6 +62,9 @@ func (rts *RedisTaskScheduler) CancelTask(taskID string) error {
 }
 
 func (rts *RedisTaskScheduler) Start() error {
+	// TODO Turn these into task.Task instances to get cancellation
+	go rts.mover()
+	go rts.worker()
 	return nil // TODO
 }
 
@@ -62,4 +72,84 @@ func (rts *RedisTaskScheduler) Stop() error {
 	return nil // TODO
 }
 
-var _ TaskScheduler = &RedisTaskScheduler{}
+func (rts *RedisTaskScheduler) worker() {
+	ticker := time.NewTicker(time.Second * 1)
+	for {
+		select {
+		case <-ticker.C:
+			log.Println("Worker: You got to work it")
+
+			result, err := rts.client.BLPop(time.Second, "Delayed:"+rts.name+":Queue").Result()
+			if err != nil {
+				if err != redis.Nil {
+					log.Println("Worker: LPop failed:", err)
+				}
+				continue
+			}
+
+			taskID := result[1]
+			log.Println("Worker: Popped", taskID)
+
+			encodedWrapper, err := rts.client.Get("Delayed:" + rts.name + ":" + taskID).Bytes()
+			if err != nil {
+				log.Println("Worker: Get failed:", err)
+				continue
+			}
+
+			var wrapper scheduledTaskWrapper
+			if err := msgpack.Unmarshal(encodedWrapper, &wrapper); err != nil {
+				log.Println("Worker: Failed to unmarshal task wrapper:", err)
+				continue
+			}
+
+			task, err := wrapper.Unwrap()
+			if err != nil {
+				log.Printf("Worker: Failed to unwrap task")
+				continue
+			}
+
+			log.Println("Worker: Going to call task ", taskID)
+
+			if err := task.Call(); err != nil {
+				log.Printf("Worker: Failed to execute task: %s", err)
+			}
+
+			if err := rts.client.Del("Delayed:" + rts.name + ":" + taskID).Err(); err != nil {
+				log.Println("Worker: Del failed:", err)
+				continue
+			}
+		}
+	}
+}
+
+func (rts *RedisTaskScheduler) mover() {
+	ticker := time.NewTicker(time.Second * 1)
+	for {
+		select {
+		case <-ticker.C:
+			log.Println("Mover: I like to move it move it") // TODO This should become a Lua script
+
+			elements, err := rts.client.ZRangeByScoreWithScores("Delayed:"+rts.name, redis.ZRangeBy{Min: "0", Max: strconv.FormatInt(time.Now().Unix(), 10)}).Result()
+			if err != nil {
+				log.Println("Mover: ZRangeByScoreWithScores failed:", err)
+				continue
+			}
+
+			for _, e := range elements {
+				log.Println("Mover: Got ", e.Member, " ", e.Score)
+
+				// Remove from the set
+				if err := rts.client.ZRem("Delayed:"+rts.name, e.Member).Err(); err != nil {
+					log.Println("Mover: ZRem failed:", err)
+					continue
+				}
+
+				// Push the ID into the work queue
+				if err := rts.client.RPush("Delayed:"+rts.name+":Queue", e.Member).Err(); err != nil {
+					log.Println("Mover: RPush failed:", err)
+					continue
+				}
+			}
+		}
+	}
+}
