@@ -10,12 +10,15 @@ import (
 	"time"
 
 	"github.com/go-redis/redis"
+	"github.com/st3fan/task"
 	"github.com/vmihailenco/msgpack"
 )
 
 type RedisTaskScheduler struct {
-	name   string
-	client *redis.Client
+	name       string
+	client     *redis.Client
+	moverTask  *task.Task
+	workerTask *task.Task
 }
 
 func NewRedisTaskScheduler(name string, addr string) (*RedisTaskScheduler, error) {
@@ -62,33 +65,40 @@ func (rts *RedisTaskScheduler) CancelTask(taskID string) error {
 }
 
 func (rts *RedisTaskScheduler) Start() error {
-	// TODO Turn these into task.Task instances to get cancellation
-	go rts.mover()
-	go rts.worker()
+	rts.moverTask = task.New(rts.mover)
+	rts.workerTask = task.New(rts.worker)
 	return nil // TODO
 }
 
 func (rts *RedisTaskScheduler) Stop() error {
-	return nil // TODO
+	rts.moverTask.SignalAndWait()
+	rts.moverTask = nil
+	rts.workerTask.SignalAndWait()
+	rts.workerTask = nil
+	return nil
 }
 
-func (rts *RedisTaskScheduler) worker() {
+func (rts *RedisTaskScheduler) worker(task *task.Task) {
 	ticker := time.NewTicker(time.Second * 1)
 	for {
+		//log.Println("Worker: Outer loop")
 		select {
+		case <-task.HasBeenClosed():
+			//log.Println("Worker: We have been closed")
+			return
 		case <-ticker.C:
-			log.Println("Worker: You got to work it")
+			//log.Println("Worker: You got to work it")
 
 			result, err := rts.client.BLPop(time.Second, "Delayed:"+rts.name+":Queue").Result()
 			if err != nil {
 				if err != redis.Nil {
 					log.Println("Worker: LPop failed:", err)
 				}
-				continue
+				continue // TODO This continues the select, not the for?
 			}
 
 			taskID := result[1]
-			log.Println("Worker: Popped", taskID)
+			//log.Println("Worker: Popped", taskID)
 
 			encodedWrapper, err := rts.client.Get("Delayed:" + rts.name + ":" + taskID).Bytes()
 			if err != nil {
@@ -104,11 +114,11 @@ func (rts *RedisTaskScheduler) worker() {
 
 			task, err := wrapper.Unwrap()
 			if err != nil {
-				log.Printf("Worker: Failed to unwrap task")
+				log.Printf("Worker: Failed to unwrap task: %s", err)
 				continue
 			}
 
-			log.Println("Worker: Going to call task ", taskID)
+			//log.Println("Worker: Going to call task ", taskID)
 
 			if err := task.Call(); err != nil {
 				log.Printf("Worker: Failed to execute task: %s", err)
@@ -122,12 +132,15 @@ func (rts *RedisTaskScheduler) worker() {
 	}
 }
 
-func (rts *RedisTaskScheduler) mover() {
+func (rts *RedisTaskScheduler) mover(task *task.Task) {
 	ticker := time.NewTicker(time.Second * 1)
 	for {
 		select {
+		case <-task.HasBeenClosed():
+			//log.Println("Mover: We have been closed")
+			return
 		case <-ticker.C:
-			log.Println("Mover: I like to move it move it") // TODO This should become a Lua script
+			//log.Println("Mover: I like to move it move it") // TODO This should become a Lua script
 
 			elements, err := rts.client.ZRangeByScoreWithScores("Delayed:"+rts.name, redis.ZRangeBy{Min: "0", Max: strconv.FormatInt(time.Now().Unix(), 10)}).Result()
 			if err != nil {
@@ -136,7 +149,7 @@ func (rts *RedisTaskScheduler) mover() {
 			}
 
 			for _, e := range elements {
-				log.Println("Mover: Got ", e.Member, " ", e.Score)
+				//log.Println("Mover: Got ", e.Member, " ", e.Score)
 
 				// Remove from the set
 				if err := rts.client.ZRem("Delayed:"+rts.name, e.Member).Err(); err != nil {
