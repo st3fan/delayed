@@ -6,7 +6,6 @@ package delayed
 
 import (
 	"fmt"
-	"log"
 	"reflect"
 	"sync"
 	"time"
@@ -25,8 +24,6 @@ func RegisterTask(task Task) {
 
 	rt := reflect.TypeOf(task).Elem()
 	name := rt.String()
-
-	log.Printf("MOO Name = %s", name)
 
 	if rt.Name() != "" {
 		if rt.PkgPath() == "" {
