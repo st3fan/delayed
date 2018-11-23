@@ -21,10 +21,10 @@ type RedisTaskScheduler struct {
 	workerTask *task.Task
 }
 
-func NewRedisTaskScheduler(name string, addr string) (*RedisTaskScheduler, error) {
+func NewRedisTaskScheduler(name string, addr string, password string) (*RedisTaskScheduler, error) {
 	return &RedisTaskScheduler{
 		name:   name,
-		client: redis.NewClient(&redis.Options{Addr: addr}),
+		client: redis.NewClient(&redis.Options{Addr: addr, Password: password}),
 	}, nil
 }
 

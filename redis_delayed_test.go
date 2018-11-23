@@ -13,7 +13,7 @@ import (
 var _ TaskScheduler = &RedisTaskScheduler{}
 
 func TestNewRedisTaskScheduler(t *testing.T) {
-	ts, err := NewRedisTaskScheduler("TestTaskScheduler", "127.0.0.1:6379")
+	ts, err := NewRedisTaskScheduler("TestTaskScheduler", "127.0.0.1:6379", "")
 	assert.NoError(t, err)
 	assert.NotNil(t, ts)
 }
